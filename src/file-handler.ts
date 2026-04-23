@@ -18,12 +18,12 @@ export interface ProcessedFile {
 export class FileHandler {
   private logger = new Logger('FileHandler');
 
-  async downloadAndProcessFiles(files: any[]): Promise<ProcessedFile[]> {
+  async downloadAndProcessFiles(files: any[], workingDirectory?: string): Promise<ProcessedFile[]> {
     const processedFiles: ProcessedFile[] = [];
 
     for (const file of files) {
       try {
-        const processed = await this.downloadFile(file);
+        const processed = await this.downloadFile(file, workingDirectory);
         if (processed) {
           processedFiles.push(processed);
         }
@@ -35,7 +35,7 @@ export class FileHandler {
     return processedFiles;
   }
 
-  private async downloadFile(file: any): Promise<ProcessedFile | null> {
+  private async downloadFile(file: any, workingDirectory?: string): Promise<ProcessedFile | null> {
     // Check file size limit (50MB)
     if (file.size > 50 * 1024 * 1024) {
       this.logger.warn('File too large, skipping', { name: file.name, size: file.size });
@@ -56,9 +56,20 @@ export class FileHandler {
       }
 
       const buffer = await response.buffer();
-      const tempDir = os.tmpdir();
-      const tempPath = path.join(tempDir, `slack-file-${Date.now()}-${file.name}`);
-      
+
+      // Save to working directory if provided, otherwise use temp dir
+      let tempPath: string;
+      if (workingDirectory) {
+        const uploadsDir = path.join(workingDirectory, '.claude-bot-uploads');
+        if (!fs.existsSync(uploadsDir)) {
+          fs.mkdirSync(uploadsDir, { recursive: true });
+        }
+        tempPath = path.join(uploadsDir, `${Date.now()}-${file.name}`);
+      } else {
+        const tempDir = os.tmpdir();
+        tempPath = path.join(tempDir, `slack-file-${Date.now()}-${file.name}`);
+      }
+
       fs.writeFileSync(tempPath, buffer);
 
       const processed: ProcessedFile = {
@@ -105,20 +116,21 @@ export class FileHandler {
 
   async formatFilePrompt(files: ProcessedFile[], userText: string): Promise<string> {
     let prompt = userText || 'Please analyze the uploaded files.';
-    
+
     if (files.length > 0) {
       prompt += '\n\nUploaded files:\n';
-      
+
       for (const file of files) {
         if (file.isImage) {
           prompt += `\n## Image: ${file.name}\n`;
+          prompt += `File path: ${file.path}\n`;
           prompt += `File type: ${file.mimetype}\n`;
-          prompt += `Path: ${file.path}\n`;
-          prompt += `Note: This is an image file that has been uploaded. You can analyze it using the Read tool to examine the image content.\n`;
+          prompt += `Please use the Read tool to view this image file.\n`;
+
         } else if (file.isText) {
           prompt += `\n## File: ${file.name}\n`;
           prompt += `File type: ${file.mimetype}\n`;
-          
+
           try {
             const content = fs.readFileSync(file.path, 'utf-8');
             if (content.length > 10000) {
@@ -133,10 +145,11 @@ export class FileHandler {
           prompt += `\n## File: ${file.name}\n`;
           prompt += `File type: ${file.mimetype}\n`;
           prompt += `Size: ${file.size} bytes\n`;
-          prompt += `Note: This is a binary file. Content analysis may be limited.\n`;
+          prompt += `Path: ${file.path}\n`;
+          prompt += `Note: This is a binary file. You can try using the Read tool to analyze it.\n`;
         }
       }
-      
+
       prompt += '\nPlease analyze these files and provide insights or assistance based on their content.';
     }
 
@@ -145,6 +158,11 @@ export class FileHandler {
 
   async cleanupTempFiles(files: ProcessedFile[]): Promise<void> {
     for (const file of files) {
+      if (file.tempPath && file.tempPath.includes(`${path.sep}.claude-bot-uploads${path.sep}`)) {
+        // Files saved into the working directory are kept for later reference
+        this.logger.debug('Keeping working-directory upload', { path: file.tempPath });
+        continue;
+      }
       if (file.tempPath) {
         try {
           fs.unlinkSync(file.tempPath);

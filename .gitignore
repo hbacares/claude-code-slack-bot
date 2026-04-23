@@ -36,3 +36,6 @@ yarn-error.log*
 # Testing
 coverage/
 .nyc_output/
+
+# Bot uploaded files
+.claude-bot-uploads/

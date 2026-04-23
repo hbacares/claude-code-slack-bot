@@ -1,6 +1,32 @@
 # Claude Code Slack Bot
 
-A Slack bot that integrates with Claude Code SDK to provide AI-powered coding assistance directly in your Slack workspace.
+A Slack bot that integrates with Claude Code SDK to provide AI-powered coding assistance directly in your Slack workspace. Redesigned as a personal Agent running tasks through Claude.ai
+
+## Acknowledgements
+
+This project is a fork of the excellent original work by [Marcel Pociot](https://github.com/marcelpociot). Many thanks for providing such a solid foundation to build on.
+
+## Changes in This Fork
+
+The following improvements have been made on top of the original:
+
+### Bug Fixes
+- Emoji reactions now use Slack API names (e.g. `thinking_face`) instead of Unicode characters, which is what the reactions API actually requires
+- Session key no longer falls back to the message `ts` when `thread_ts` is absent, preventing mismatched session lookups
+- Permission MCP server path is now resolved relative to the project root instead of a hardcoded local path
+- `permissionMode` set to `bypassPermissions` consistently (was conditionally `default`, which caused permission prompts to silently fail)
+
+### New Features
+- **Session persistence** — active sessions are saved to disk (`data/sessions.json`) and restored on restart, so conversations survive bot restarts
+- **Configurable session timeouts** — set `SESSION_TIMEOUT_HOURS`, `SESSION_PERSISTENCE_PATH`, and `SESSION_CLEANUP_INTERVAL_MINUTES` via environment variables
+- **Smart session error recovery** — if a resumed session fails due to context length, the bot automatically retries with a fresh session instead of erroring out
+- **Thread replies without @mention** — once a thread has an active session, you can reply without @mentioning the bot and it will respond
+- **Channel messages without @mention** — if a working directory is configured for a channel, the bot responds to all messages in that channel (not just @mentions)
+- **File uploads saved to working directory** — uploaded files are stored in `.claude-bot-uploads/` inside the project directory so Claude can reference them with relative paths
+- **Configurable Claude executable path** — set `CLAUDE_CODE_PATH` to point to a non-default Claude installation; omit it to use the system PATH
+- **stderr capture with secret redaction** — Claude subprocess stderr is logged with tokens and API keys automatically redacted
+- **macOS LaunchAgent script** (`bot.sh`) — start/stop/restart/status commands for running the bot as a background service
+
 
 ## Features
 

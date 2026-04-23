@@ -29,9 +29,15 @@ async function start() {
     // Initialize MCP manager
     const mcpManager = new McpManager();
     const mcpConfig = mcpManager.loadConfiguration();
-    
+
     // Initialize handlers
     const claudeHandler = new ClaudeHandler(mcpManager);
+
+    // Load persisted sessions from previous runs, then purge any that already expired
+    const sessionCount = claudeHandler.loadPersistedSessions();
+    const cleaned = claudeHandler.cleanupInactiveSessions();
+    logger.info(`Loaded ${sessionCount} persisted session(s) from disk (${cleaned} expired and removed)`);
+
     const slackHandler = new SlackHandler(app, claudeHandler, mcpManager);
 
     // Setup event handlers

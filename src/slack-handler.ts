@@ -51,23 +51,10 @@ export class SlackHandler {
 
   async handleMessage(event: MessageEvent, say: any) {
     const { user, channel, thread_ts, ts, text, files } = event;
-    
-    // Process any attached files
-    let processedFiles: ProcessedFile[] = [];
-    if (files && files.length > 0) {
-      this.logger.info('Processing uploaded files', { count: files.length });
-      processedFiles = await this.fileHandler.downloadAndProcessFiles(files);
-      
-      if (processedFiles.length > 0) {
-        await say({
-          text: `📎 Processing ${processedFiles.length} file(s): ${processedFiles.map(f => f.name).join(', ')}`,
-          thread_ts: thread_ts || ts,
-        });
-      }
-    }
+    const isDM = channel.startsWith('D');
 
     // If no text and no files, nothing to process
-    if (!text && processedFiles.length === 0) return;
+    if (!text && (!files || files.length === 0)) return;
 
     this.logger.debug('Received message from Slack', {
       user,
@@ -75,13 +62,12 @@ export class SlackHandler {
       thread_ts,
       ts,
       text: text ? text.substring(0, 100) + (text.length > 100 ? '...' : '') : '[no text]',
-      fileCount: processedFiles.length,
+      fileCount: files?.length ?? 0,
     });
 
     // Check if this is a working directory command (only if there's text)
     const setDirPath = text ? this.workingDirManager.parseSetCommand(text) : null;
     if (setDirPath) {
-      const isDM = channel.startsWith('D');
       const result = this.workingDirManager.setWorkingDirectory(
         channel,
         setDirPath,
@@ -93,12 +79,10 @@ export class SlackHandler {
         const context = thread_ts ? 'this thread' : (isDM ? 'this conversation' : 'this channel');
         await say({
           text: `✅ Working directory set for ${context}: \`${result.resolvedPath}\``,
-          thread_ts: thread_ts || ts,
         });
       } else {
         await say({
           text: `❌ ${result.error}`,
-          thread_ts: thread_ts || ts,
         });
       }
       return;
@@ -106,17 +90,15 @@ export class SlackHandler {
 
     // Check if this is a get directory command (only if there's text)
     if (text && this.workingDirManager.isGetCommand(text)) {
-      const isDM = channel.startsWith('D');
       const directory = this.workingDirManager.getWorkingDirectory(
         channel,
         thread_ts,
         isDM ? user : undefined
       );
       const context = thread_ts ? 'this thread' : (isDM ? 'this conversation' : 'this channel');
-      
+
       await say({
         text: this.workingDirManager.formatDirectoryMessage(directory, context),
-        thread_ts: thread_ts || ts,
       });
       return;
     }
@@ -125,7 +107,6 @@ export class SlackHandler {
     if (text && this.isMcpInfoCommand(text)) {
       await say({
         text: this.mcpManager.formatMcpInfo(),
-        thread_ts: thread_ts || ts,
       });
       return;
     }
@@ -136,29 +117,24 @@ export class SlackHandler {
       if (reloaded) {
         await say({
           text: `✅ MCP configuration reloaded successfully.\n\n${this.mcpManager.formatMcpInfo()}`,
-          thread_ts: thread_ts || ts,
         });
       } else {
         await say({
           text: `❌ Failed to reload MCP configuration. Check the mcp-servers.json file.`,
-          thread_ts: thread_ts || ts,
         });
       }
       return;
     }
 
-    // Check if we have a working directory set
-    const isDM = channel.startsWith('D');
+    // Working directory is always required
     const workingDirectory = this.workingDirManager.getWorkingDirectory(
       channel,
       thread_ts,
       isDM ? user : undefined
     );
-
-    // Working directory is always required
     if (!workingDirectory) {
       let errorMessage = `⚠️ No working directory set. `;
-      
+
       if (!isDM && !this.workingDirManager.hasChannelWorkingDirectory(channel)) {
         // No channel default set
         errorMessage += `Please set a default working directory for this channel first using:\n`;
@@ -179,15 +155,29 @@ export class SlackHandler {
       } else {
         errorMessage += `Please set one first using:\n\`cwd /path/to/directory\``;
       }
-      
+
       await say({
         text: errorMessage,
-        thread_ts: thread_ts || ts,
       });
       return;
     }
 
-    const sessionKey = this.claudeHandler.getSessionKey(user, channel, thread_ts || ts);
+    // Download files now that we know we have a valid working directory
+    let processedFiles: ProcessedFile[] = [];
+    if (files && files.length > 0) {
+      this.logger.info('Processing uploaded files', { count: files.length });
+      processedFiles = await this.fileHandler.downloadAndProcessFiles(files, workingDirectory);
+
+      if (processedFiles.length > 0) {
+        await say({
+          text: `📎 Processing ${processedFiles.length} file(s): ${processedFiles.map(f => f.name).join(', ')}`,
+        });
+      }
+    }
+
+    if (!text && processedFiles.length === 0) return;
+
+    const sessionKey = this.claudeHandler.getSessionKey(user, channel, thread_ts);
     
     // Store the original message info for status reactions
     const originalMessageTs = thread_ts || ts;
@@ -203,10 +193,10 @@ export class SlackHandler {
     const abortController = new AbortController();
     this.activeControllers.set(sessionKey, abortController);
 
-    let session = this.claudeHandler.getSession(user, channel, thread_ts || ts);
+    let session = this.claudeHandler.getSession(user, channel, thread_ts);
     if (!session) {
       this.logger.debug('Creating new session', { sessionKey });
-      session = this.claudeHandler.createSession(user, channel, thread_ts || ts);
+      session = this.claudeHandler.createSession(user, channel, thread_ts);
     } else {
       this.logger.debug('Using existing session', { sessionKey, sessionId: session.sessionId });
     }
@@ -230,12 +220,11 @@ export class SlackHandler {
       // Send initial status message
       const statusResult = await say({
         text: '🤔 *Thinking...*',
-        thread_ts: thread_ts || ts,
       });
       statusMessageTs = statusResult.ts;
 
       // Add thinking reaction to original message (but don't spam if already set)
-      await this.updateMessageReaction(sessionKey, '🤔');
+      await this.updateMessageReaction(sessionKey, 'thinking_face');
       
       // Create Slack context for permission prompts
       const slackContext = {
@@ -268,7 +257,7 @@ export class SlackHandler {
             }
 
             // Update reaction to show working
-            await this.updateMessageReaction(sessionKey, '⚙️');
+            await this.updateMessageReaction(sessionKey, 'gear');
 
             // Check for TodoWrite tool and handle it specially
             const todoTool = message.message.content?.find((part: any) => 
@@ -284,7 +273,6 @@ export class SlackHandler {
             if (toolContent) { // Only send if there's content (TodoWrite returns empty string)
               await say({
                 text: toolContent,
-                thread_ts: thread_ts || ts,
               });
             }
           } else {
@@ -297,7 +285,6 @@ export class SlackHandler {
               const formatted = this.formatMessage(content, false);
               await say({
                 text: formatted,
-                thread_ts: thread_ts || ts,
               });
             }
           }
@@ -315,7 +302,6 @@ export class SlackHandler {
               const formatted = this.formatMessage(finalResult, true);
               await say({
                 text: formatted,
-                thread_ts: thread_ts || ts,
               });
             }
           }
@@ -332,7 +318,7 @@ export class SlackHandler {
       }
 
       // Update reaction to show completion
-      await this.updateMessageReaction(sessionKey, '✅');
+      await this.updateMessageReaction(sessionKey, 'white_check_mark');
 
       this.logger.info('Completed processing message', {
         sessionKey,
@@ -357,11 +343,10 @@ export class SlackHandler {
         }
 
         // Update reaction to show error
-        await this.updateMessageReaction(sessionKey, '❌');
+        await this.updateMessageReaction(sessionKey, 'x');
         
         await say({
           text: `Error: ${error.message || 'Something went wrong'}`,
-          thread_ts: thread_ts || ts,
         });
       } else {
         this.logger.debug('Request was aborted', { sessionKey });
@@ -376,7 +361,7 @@ export class SlackHandler {
         }
 
         // Update reaction to show cancellation
-        await this.updateMessageReaction(sessionKey, '⏹️');
+        await this.updateMessageReaction(sessionKey, 'stop_button');
       }
 
       // Clean up temporary files in case of error too
@@ -541,7 +526,6 @@ export class SlackHandler {
       if (statusChange) {
         await say({
           text: `🔄 *Task Update:*\n${statusChange}`,
-          thread_ts: threadTs,
         });
       }
 
@@ -559,7 +543,6 @@ export class SlackHandler {
   ): Promise<void> {
     const result = await say({
       text: todoList,
-      thread_ts: threadTs,
     });
     
     if (result?.ts) {
@@ -633,11 +616,11 @@ export class SlackHandler {
 
     let emoji: string;
     if (completed === total) {
-      emoji = '✅'; // All tasks completed
+      emoji = 'white_check_mark';
     } else if (inProgress > 0) {
-      emoji = '🔄'; // Tasks in progress
+      emoji = 'arrows_counterclockwise';
     } else {
-      emoji = '📋'; // Tasks pending
+      emoji = 'clipboard';
     }
 
     await this.updateMessageReaction(sessionKey, emoji);
@@ -713,13 +696,8 @@ export class SlackHandler {
   }
 
   setupEventHandlers() {
-    // Handle direct messages
-    this.app.message(async ({ message, say }) => {
-      if (message.subtype === undefined && 'user' in message) {
-        this.logger.info('Handling direct message event');
-        await this.handleMessage(message as MessageEvent, say);
-      }
-    });
+    // Warm the bot user ID cache so the message handler can filter @mentions immediately
+    this.getBotUserId();
 
     // Handle app mentions
     this.app.event('app_mention', async ({ event, say }) => {
@@ -731,12 +709,49 @@ export class SlackHandler {
       } as MessageEvent, say);
     });
 
-    // Handle file uploads in threads
+    // Single unified message handler for DMs, file uploads, and thread replies
     this.app.event('message', async ({ event, say }) => {
-      // Only handle file uploads that are not from bots and have files
-      if (event.subtype === 'file_share' && 'user' in event && event.files) {
+      if (!('user' in event)) return;
+
+      const msg = event as any;
+      const isThreadReply = 'thread_ts' in msg && msg.thread_ts && msg.thread_ts !== msg.ts;
+      const isDM = (msg.channel as string)?.startsWith('D');
+
+      // Handle file uploads
+      if (msg.subtype === 'file_share' && msg.files) {
         this.logger.info('Handling file upload event');
-        await this.handleMessage(event as MessageEvent, say);
+        await this.handleMessage(msg as MessageEvent, say);
+        return;
+      }
+
+      // Handle DMs (non-thread messages only — thread replies handled below)
+      if (isDM && !isThreadReply && !msg.subtype) {
+        this.logger.info('Handling direct message event');
+        await this.handleMessage(msg as MessageEvent, say);
+        return;
+      }
+
+      // Handle thread replies without @mention
+      // Only respond if this thread already has an active session (bot was previously @mentioned)
+      if (!msg.subtype && isThreadReply) {
+        const threadTs = msg.thread_ts;
+        const existingSession = this.claudeHandler.getSession(msg.user, msg.channel, threadTs);
+
+        if (existingSession) {
+          this.logger.info('Handling thread reply without @mention');
+          await this.handleMessage(msg as MessageEvent, say);
+        }
+      }
+
+      // Handle non-thread channel messages without @mention (if cwd is set for the channel)
+      if (!msg.subtype && !isThreadReply && !isDM) {
+        const botId = await this.getBotUserId();
+        if (!msg.text?.includes(`<@${botId}>`)) {
+          if (this.workingDirManager.hasChannelWorkingDirectory(msg.channel)) {
+            this.logger.info('Handling channel message (cwd configured)');
+            await this.handleMessage(msg as MessageEvent, say);
+          }
+        }
       }
     });
 
@@ -781,6 +796,6 @@ export class SlackHandler {
     setInterval(() => {
       this.logger.debug('Running session cleanup');
       this.claudeHandler.cleanupInactiveSessions();
-    }, 5 * 60 * 1000); // Every 5 minutes
+    }, config.sessions.cleanupIntervalMinutes * 60 * 1000);
   }
 }
